@@ -1,0 +1,586 @@
+/*
+ * ============================================
+ * SCRIPT AUTO-RELLENO MYTE - PUNCH CLOCK v3.2
+ * ============================================
+ * 
+ * INSTRUCCIONES:
+ * 1. Abre la ventana de Working Hours en myTE
+ * 2. Pulsa F12 para abrir la consola del navegador
+ * 3. Copia y pega este script completo en la consola
+ * 4. Pulsa Enter para ejecutar
+ * 
+ * ============================================
+ * ⚙️ CONFIGURACIÓN PERSONALIZABLE (MODIFICAR AQUÍ)
+ * ============================================
+ * 
+ * Formato de hora: 'HH:MM' (ejemplo: '06:30', '14:00', '09:00')
+ * Para desactivar breaks, pon: BREAK_START: null
+ * Para desactivar turno 2, pon: TURNO_2_ACTIVO: false
+ * 
+ */
+
+(function() {
+    'use strict';
+    
+    // ============================================
+    // ⚙️ CONFIGURACIÓN - MODIFICA TUS HORARIOS AQUÍ
+    // ============================================
+    const MI_HORARIO = {
+        
+        // ═══════════════════════════════════════════
+        // 📅 LUNES A JUEVES
+        // ═══════════════════════════════════════════
+        LUNES_JUEVES: {
+            ENTRADA: '06:30',        // Hora de entrada
+            SALIDA: '14:00',         // Hora de salida
+            BREAK_START: '14:00',    // Inicio del break (null = sin break)
+            BREAK_END: '14:30'       // Fin del break
+        },
+        
+        // ═══════════════════════════════════════════
+        // 📅 VIERNES
+        // ═══════════════════════════════════════════
+        VIERNES: {
+            ENTRADA: '06:30',        // Hora de entrada
+            SALIDA: '13:00',         // Hora de salida (jornada intensiva)
+            BREAK_START: null,       // null = sin break en viernes
+            BREAK_END: null
+        },
+        
+        // ═══════════════════════════════════════════
+        // 📅 TURNO 2 (TARDE) - Solo Lunes a Jueves
+        // ═══════════════════════════════════════════
+        TURNO_2: {
+            ACTIVO: true,            // true = añadir turno 2, false = solo turno 1
+            ENTRADA: '14:30',        // Hora de entrada turno 2
+            SALIDA: '16:00'          // Hora de salida turno 2
+        },
+        
+        // ═══════════════════════════════════════════
+        // ⏱️ CONFIGURACIÓN TÉCNICA
+        // ═══════════════════════════════════════════
+        DELAY_ENTRE_FILAS: 1000      // Milisegundos entre añadir filas (1000 = 1 seg)
+    };
+    
+    // ============================================
+    // ⚠️ NO MODIFICAR NADA DEBAJO DE ESTA LÍNEA ⚠️
+    // ============================================
+    
+    console.log('%c🕐 MYTE Auto-Fill Script v3.2', 'color: #007bff; font-size: 16px; font-weight: bold;');
+    console.log('%c⚙️ Configuración cargada:', 'color: #17a2b8;');
+    console.log(`   L-J: ${MI_HORARIO.LUNES_JUEVES.ENTRADA} - ${MI_HORARIO.LUNES_JUEVES.SALIDA}` + 
+                (MI_HORARIO.LUNES_JUEVES.BREAK_START ? ` (Break: ${MI_HORARIO.LUNES_JUEVES.BREAK_START}-${MI_HORARIO.LUNES_JUEVES.BREAK_END})` : ''));
+    console.log(`   Viernes: ${MI_HORARIO.VIERNES.ENTRADA} - ${MI_HORARIO.VIERNES.SALIDA}` +
+                (MI_HORARIO.VIERNES.BREAK_START ? ` (Break: ${MI_HORARIO.VIERNES.BREAK_START}-${MI_HORARIO.VIERNES.BREAK_END})` : ' (sin break)'));
+    if (MI_HORARIO.TURNO_2.ACTIVO) {
+        console.log(`   Turno 2 (L-J): ${MI_HORARIO.TURNO_2.ENTRADA} - ${MI_HORARIO.TURNO_2.SALIDA}`);
+    }
+    
+    // Estado del script
+    let isProcessing = false;
+    
+    // ============================================
+    // FUNCIONES DE LOGGING
+    // ============================================
+    
+    function logInfo(message) {
+        console.log(`ℹ️ ${message}`);
+    }
+    
+    function logSuccess(message) {
+        console.log(`%c✅ ${message}`, 'color: #28a745;');
+    }
+    
+    function logWarning(message) {
+        console.log(`%c⚠️ ${message}`, 'color: #ffc107;');
+    }
+    
+    function logError(message, error = null) {
+        console.log(`%c❌ ${message}`, 'color: #dc3545;');
+        if (error) console.error(error);
+    }
+    
+    // ============================================
+    // FUNCIONES DE UTILIDAD PARA FECHAS
+    // ============================================
+    
+    const dayNameToNumber = {
+        'sun': 0, 'sunday': 0, 'dom': 0, 'domingo': 0,
+        'mon': 1, 'monday': 1, 'lun': 1, 'lunes': 1,
+        'tue': 2, 'tuesday': 2, 'mar': 2, 'martes': 2,
+        'wed': 3, 'wednesday': 3, 'mie': 3, 'miércoles': 3, 'miercoles': 3,
+        'thu': 4, 'thursday': 4, 'jue': 4, 'jueves': 4,
+        'fri': 5, 'friday': 5, 'vie': 5, 'viernes': 5,
+        'sat': 6, 'saturday': 6, 'sab': 6, 'sábado': 6, 'sabado': 6
+    };
+    
+    function getDayOfWeek(dateString) {
+        if (!dateString) return -1;
+        const lowerText = dateString.toLowerCase();
+        for (const [dayName, dayNum] of Object.entries(dayNameToNumber)) {
+            if (lowerText.includes(dayName)) {
+                return dayNum;
+            }
+        }
+        return -1;
+    }
+    
+    function isWeekday(dateString) {
+        const day = getDayOfWeek(dateString);
+        return day >= 1 && day <= 5;
+    }
+    
+    function isFriday(dateString) {
+        return getDayOfWeek(dateString) === 5;
+    }
+    
+    function isMondayToThursday(dateString) {
+        const day = getDayOfWeek(dateString);
+        return day >= 1 && day <= 4;
+    }
+    
+    function getDayName(dateString) {
+        const days = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+        const day = getDayOfWeek(dateString);
+        return day >= 0 ? days[day] : 'Desconocido';
+    }
+    
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    
+    // ============================================
+    // OBTENER FECHA DE UNA FILA
+    // ============================================
+    
+    function getDateTextForRow(rowIdx) {
+        const dateCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] [col-id="dateTime"]`);
+        let dateText = '';
+        
+        if (dateCell) {
+            const dateRenderer = dateCell.querySelector('myte-punch-clock-date-cell-renderer');
+            if (dateRenderer) {
+                const innerDiv = dateRenderer.querySelector('div');
+                if (innerDiv) {
+                    dateText = innerDiv.childNodes[0]?.textContent?.trim() || innerDiv.textContent.trim().split('\n')[0].trim();
+                }
+            }
+            if (!dateText) {
+                dateText = dateCell.textContent.trim();
+            }
+        }
+        return dateText;
+    }
+    
+    // ============================================
+    // OBTENER DATOS DE FILAS
+    // ============================================
+    
+    function getRowsData() {
+        const rows = [];
+        const allRows = document.querySelectorAll('#workingHoursPunchClockGrid .ag-row[row-index]');
+        const rowIndexes = new Set();
+        
+        allRows.forEach(row => {
+            const idx = row.getAttribute('row-index');
+            if (idx !== null) rowIndexes.add(idx);
+        });
+        
+        const sortedIndexes = Array.from(rowIndexes).map(Number).sort((a, b) => a - b);
+        
+        sortedIndexes.forEach((rowIdx) => {
+            const dateText = getDateTextForRow(rowIdx);
+            rows.push({
+                rowIndex: rowIdx,
+                dateText: dateText
+            });
+        });
+        
+        return rows;
+    }
+    
+    // ============================================
+    // MÉTODOS DE EDICIÓN DE CELDAS
+    // ============================================
+    
+    function setCellTime(rowIndex, colId, timeValue) {
+        const cell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIndex}"] [col-id="${colId}"]`);
+        if (!cell) return false;
+        
+        const timeRenderer = cell.querySelector('myte-time-cell-renderer');
+        if (!timeRenderer) return false;
+        
+        const hoursSelect = timeRenderer.querySelector('select[name="hours"]');
+        const minutesSelect = timeRenderer.querySelector('select[name="minutes"]');
+        if (!hoursSelect || !minutesSelect) return false;
+        
+        // Si ya tiene valor, saltar
+        if (hoursSelect.value !== '-1' && hoursSelect.value !== '') {
+            return false;
+        }
+        
+        const [hours, minutes] = timeValue.split(':').map(s => parseInt(s, 10));
+        
+        hoursSelect.value = hours.toString();
+        hoursSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        minutesSelect.value = minutes.toString();
+        minutesSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        hoursSelect.dispatchEvent(new Event('blur', { bubbles: true }));
+        
+        return true;
+    }
+    
+    function clearCellTime(rowIndex, colId) {
+        const cell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIndex}"] [col-id="${colId}"]`);
+        if (!cell) return;
+        
+        const timeRenderer = cell.querySelector('myte-time-cell-renderer');
+        if (!timeRenderer) return;
+        
+        const hoursSelect = timeRenderer.querySelector('select[name="hours"]');
+        const minutesSelect = timeRenderer.querySelector('select[name="minutes"]');
+        
+        if (hoursSelect) {
+            hoursSelect.value = '-1';
+            hoursSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        if (minutesSelect) {
+            minutesSelect.value = '-1';
+            minutesSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }
+    
+    // ============================================
+    // FUNCIÓN PRINCIPAL DE LLENADO TURNO 1
+    // ============================================
+    
+    function fillRowTurno1(rowData) {
+        const { rowIndex, dateText } = rowData;
+        const dayName = getDayName(dateText);
+        
+        if (!isWeekday(dateText)) {
+            return false;
+        }
+        
+        console.log(`📅 Fila ${rowIndex} (${dayName}, ${dateText}) - Turno 1`);
+        
+        // Seleccionar horario según día
+        const horario = isFriday(dateText) ? MI_HORARIO.VIERNES : MI_HORARIO.LUNES_JUEVES;
+        
+        let filled = false;
+        if (setCellTime(rowIndex, 'workStartTime', horario.ENTRADA)) {
+            logSuccess(`  workStartTime: ${horario.ENTRADA}`);
+            filled = true;
+        }
+        if (setCellTime(rowIndex, 'workEndTime', horario.SALIDA)) {
+            logSuccess(`  workEndTime: ${horario.SALIDA}`);
+            filled = true;
+        }
+        
+        // Break solo si está configurado
+        if (horario.BREAK_START && horario.BREAK_END) {
+            if (setCellTime(rowIndex, 'mealStartTime', horario.BREAK_START)) {
+                logSuccess(`  mealStartTime: ${horario.BREAK_START}`);
+                filled = true;
+            }
+            if (setCellTime(rowIndex, 'mealEndTime', horario.BREAK_END)) {
+                logSuccess(`  mealEndTime: ${horario.BREAK_END}`);
+                filled = true;
+            }
+        }
+        
+        return filled;
+    }
+    
+    // ============================================
+    // CONTADORES Y VERIFICACIONES
+    // ============================================
+    
+    function countMondayToThursdayRows() {
+        const rows = getRowsData();
+        let count = 0;
+        rows.forEach(row => {
+            if (isMondayToThursday(row.dateText)) count++;
+        });
+        return count;
+    }
+    
+    function areAllMondayToThursdayComplete() {
+        const rows = getRowsData();
+        let total = 0;
+        let complete = 0;
+        
+        rows.forEach(rowData => {
+            if (isMondayToThursday(rowData.dateText)) {
+                total++;
+                const rowIdx = rowData.rowIndex;
+                const workStartCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] [col-id="workStartTime"]`);
+                const startHoursSelect = workStartCell?.querySelector('select[name="hours"]');
+                
+                if (startHoursSelect && startHoursSelect.value !== '-1' && startHoursSelect.value !== '') {
+                    complete++;
+                }
+            }
+        });
+        
+        return total > 0 && total === complete;
+    }
+    
+    // ============================================
+    // ENCONTRAR Y HACER CLICK EN BOTÓN ADD
+    // ============================================
+    
+    function findAddButton() {
+        const addBtn = document.querySelector('button.add-button[aria-label="Add new row"]');
+        if (addBtn) return addBtn;
+        
+        const addBtnByClass = document.querySelector('.action-button.add-button');
+        if (addBtnByClass) return addBtnByClass;
+        
+        const addBtnByAria = document.querySelector('button[aria-label*="Add"]');
+        if (addBtnByAria) return addBtnByAria;
+        
+        return null;
+    }
+    
+    async function clickAddButtonForRow(targetIndex) {
+        const rows = getRowsData();
+        let mondayThursdayIndex = 0;
+        
+        for (const row of rows) {
+            if (isMondayToThursday(row.dateText)) {
+                if (mondayThursdayIndex === targetIndex) {
+                    const rowIdx = row.rowIndex;
+                    const actionCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] myte-punch-clock-action-cell-renderer`);
+                    
+                    if (actionCell) {
+                        const addBtn = actionCell.querySelector('button.add-button, button[aria-label*="Add"]');
+                        if (addBtn) {
+                            logInfo(`➕ Click en Add de fila ${row.dateText}...`);
+                            addBtn.click();
+                            return true;
+                        }
+                    }
+                }
+                mondayThursdayIndex++;
+            }
+        }
+        
+        const addButton = findAddButton();
+        if (addButton) {
+            addButton.click();
+            return true;
+        }
+        return false;
+    }
+    
+    // ============================================
+    // RELLENAR FILAS VACÍAS (TURNO 2)
+    // ============================================
+    
+    function fillEmptyRows() {
+        console.log('%c🔍 Buscando filas vacías para Turno 2...', 'color: #ff6600; font-weight: bold;');
+        
+        const allRows = document.querySelectorAll('#workingHoursPunchClockGrid .ag-row[row-index]');
+        const rowIndexes = new Set();
+        
+        allRows.forEach(row => {
+            const idx = row.getAttribute('row-index');
+            if (idx !== null) rowIndexes.add(Number(idx));
+        });
+        
+        let filledCount = 0;
+        let skippedWeekend = 0;
+        const sortedIndexes = Array.from(rowIndexes).sort((a, b) => a - b);
+        
+        // Obtener hora de turno 2 desde configuración
+        const [t2EntradaH, t2EntradaM] = MI_HORARIO.TURNO_2.ENTRADA.split(':').map(Number);
+        const [t2SalidaH, t2SalidaM] = MI_HORARIO.TURNO_2.SALIDA.split(':').map(Number);
+        
+        for (const rowIdx of sortedIndexes) {
+            const dateText = getDateTextForRow(rowIdx);
+            
+            // Saltar fines de semana y viernes
+            if (dateText) {
+                const dayOfWeek = getDayOfWeek(dateText);
+                if (dayOfWeek === 0 || dayOfWeek === 6) {
+                    skippedWeekend++;
+                    continue;
+                }
+                if (dayOfWeek === 5) {
+                    continue; // Viernes no necesita Turno 2
+                }
+            }
+            
+            // Verificar si está vacía
+            const workStartCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] [col-id="workStartTime"]`);
+            if (!workStartCell) continue;
+            
+            const hoursSelect = workStartCell.querySelector('select[name="hours"]');
+            if (!hoursSelect) continue;
+            
+            const currentHours = hoursSelect.value;
+            
+            // Si está vacía, rellenar con horario turno 2
+            if (currentHours === '-1' || currentHours === '' || currentHours === null) {
+                console.log(`✅ Fila ${rowIdx} vacía - Rellenando ${MI_HORARIO.TURNO_2.ENTRADA}-${MI_HORARIO.TURNO_2.SALIDA}`);
+                
+                // Work Start
+                hoursSelect.value = t2EntradaH.toString();
+                hoursSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                const minutesSelect = workStartCell.querySelector('select[name="minutes"]');
+                if (minutesSelect) {
+                    minutesSelect.value = t2EntradaM.toString();
+                    minutesSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                
+                // Work End
+                const workEndCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] [col-id="workEndTime"]`);
+                if (workEndCell) {
+                    const endHours = workEndCell.querySelector('select[name="hours"]');
+                    const endMinutes = workEndCell.querySelector('select[name="minutes"]');
+                    if (endHours) {
+                        endHours.value = t2SalidaH.toString();
+                        endHours.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    if (endMinutes) {
+                        endMinutes.value = t2SalidaM.toString();
+                        endMinutes.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+                
+                // Limpiar breaks
+                clearCellTime(rowIdx, 'mealStartTime');
+                clearCellTime(rowIdx, 'mealEndTime');
+                
+                filledCount++;
+                logSuccess(`Fila ${rowIdx}: ${MI_HORARIO.TURNO_2.ENTRADA} - ${MI_HORARIO.TURNO_2.SALIDA} ✓`);
+            }
+        }
+        
+        // LIMPIEZA: Asegurar fines de semana vacíos
+        console.log('%c🧹 Limpiando fines de semana...', 'color: #ff6600;');
+        let cleanedWeekends = 0;
+        
+        for (const rowIdx of sortedIndexes) {
+            const dateText = getDateTextForRow(rowIdx);
+            if (dateText) {
+                const dayOfWeek = getDayOfWeek(dateText);
+                if (dayOfWeek === 0 || dayOfWeek === 6) {
+                    const workStartCell = document.querySelector(`#workingHoursPunchClockGrid .ag-row[row-index="${rowIdx}"] [col-id="workStartTime"]`);
+                    const startHours = workStartCell?.querySelector('select[name="hours"]');
+                    if (startHours && startHours.value !== '-1') {
+                        clearCellTime(rowIdx, 'workStartTime');
+                        clearCellTime(rowIdx, 'workEndTime');
+                        clearCellTime(rowIdx, 'mealStartTime');
+                        clearCellTime(rowIdx, 'mealEndTime');
+                        cleanedWeekends++;
+                        console.log(`🧹 Limpiado: Fila ${rowIdx} (${dateText})`);
+                    }
+                }
+            }
+        }
+        
+        console.log(`%c✅ Turno 2: ${filledCount} filas rellenadas, ${cleanedWeekends} fines de semana limpiados`, 'color: #28a745; font-weight: bold;');
+        return filledCount;
+    }
+    
+    // ============================================
+    // PROCESO PRINCIPAL
+    // ============================================
+    
+    async function processAllRows() {
+        if (isProcessing) {
+            logWarning('Ya hay un proceso en ejecución');
+            return;
+        }
+        
+        isProcessing = true;
+        console.log('%c🚀 Iniciando proceso de auto-relleno...', 'color: #28a745; font-weight: bold;');
+        
+        try {
+            // TURNO 1
+            console.log('%c📌 TURNO 1 (Mañana): 06:30 - 14:00/13:00', 'color: #17a2b8; font-weight: bold;');
+            
+            const rows = getRowsData();
+            if (rows.length === 0) {
+                logError('No se encontraron filas en el grid');
+                isProcessing = false;
+                return;
+            }
+            
+            logInfo(`Procesando ${rows.length} filas...`);
+            
+            for (const row of rows) {
+                fillRowTurno1(row);
+            }
+            
+            // TURNO 2
+            const mondayToThursdayCount = countMondayToThursdayRows();
+            const isComplete = areAllMondayToThursdayComplete();
+            
+            if (MI_HORARIO.TURNO_2.ACTIVO && mondayToThursdayCount > 0 && isComplete) {
+                console.log(`%c📌 TURNO 2 (Tarde): ${MI_HORARIO.TURNO_2.ENTRADA} - ${MI_HORARIO.TURNO_2.SALIDA}`, 'color: #17a2b8; font-weight: bold;');
+                
+                logInfo(`Añadiendo ${mondayToThursdayCount} filas para Turno 2...`);
+                
+                // Añadir filas
+                for (let i = 0; i < mondayToThursdayCount; i++) {
+                    logInfo(`➕ Fila ${i + 1} de ${mondayToThursdayCount}...`);
+                    const added = await clickAddButtonForRow(i);
+                    if (added) {
+                        await sleep(MI_HORARIO.DELAY_ENTRE_FILAS);
+                    }
+                }
+                
+                // Rellenar filas vacías
+                await sleep(500);
+                fillEmptyRows();
+            } else if (!MI_HORARIO.TURNO_2.ACTIVO) {
+                logInfo('Turno 2 desactivado en configuración');
+            }
+            
+            console.log('%c✅ Proceso completado!', 'color: #28a745; font-size: 14px; font-weight: bold;');
+            
+            // ASCII Art con amor
+            console.log(`%c
+   ██████╗ ██████╗ ███╗   ██╗     █████╗ ███╗   ███╗ ██████╗ ██████╗     ♥
+  ██╔════╝██╔═══██╗████╗  ██║    ██╔══██╗████╗ ████║██╔═══██╗██╔══██╗    ♥
+  ██║     ██║   ██║██╔██╗ ██║    ███████║██╔████╔██║██║   ██║██████╔╝    ♥
+  ██║     ██║   ██║██║╚██╗██║    ██╔══██║██║╚██╔╝██║██║   ██║██╔══██╗    
+  ╚██████╗╚██████╔╝██║ ╚████║    ██║  ██║██║ ╚═╝ ██║╚██████╔╝██║  ██║    ♥
+   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝    ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝    
+
+  ██████╗  █████╗ ██╗   ██╗██╗██████╗     ███████╗ ██████╗  ██████╗ 
+  ██╔══██╗██╔══██╗██║   ██║██║██╔══██╗    ██╔════╝██╔════╝ ██╔════╝ 
+  ██║  ██║███████║██║   ██║██║██║  ██║    ███████╗██║  ███╗██║  ███╗
+  ██║  ██║██╔══██║╚██╗ ██╔╝██║██║  ██║    ╚════██║██║   ██║██║   ██║
+  ██████╔╝██║  ██║ ╚████╔╝ ██║██████╔╝    ███████║╚██████╔╝╚██████╔╝
+  ╚═════╝ ╚═╝  ╚═╝  ╚═══╝  ╚═╝╚═════╝     ╚══════╝ ╚═════╝  ╚═════╝ 
+            `, 'color: #9b59b6; font-family: monospace;');
+            
+        } catch (error) {
+            logError('Error durante el proceso:', error);
+        } finally {
+            isProcessing = false;
+        }
+    }
+    
+    // ============================================
+    // INICIALIZACIÓN
+    // ============================================
+    
+    window.fillEmptyRows = fillEmptyRows;
+    window.myteAutoFill = processAllRows;
+    
+    console.log('⏳ Iniciando auto-relleno en 2 segundos...');
+    console.log('💡 Ejecuta myteAutoFill() para volver a ejecutar');
+    console.log('💡 Ejecuta fillEmptyRows() para rellenar solo filas vacías');
+    
+    setTimeout(() => {
+        processAllRows();
+    }, 2000);
+    
+})();
