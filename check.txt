@@ -1,0 +1,110 @@
+// Program.cs - .NET Framework 4.8 - compilar x86
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Configuration;
+using System.Web.Configuration; // para ProtectedConfiguration (si se necesita)
+
+class ConnStringInspector
+{
+    static void Main(string[] args)
+    {
+        string enc = args.Length>0 ? args[0] : ConfigurationManager.AppSettings["EncryptedConnectionString"];
+        if (string.IsNullOrEmpty(enc)) { Console.WriteLine("Pasa la cadena cifrada como argumento o en appSettings."); return; }
+        enc = enc.Trim();
+        Console.WriteLine("Valor (trunc): " + (enc.Length>120 ? enc.Substring(0,120)+"..." : enc));
+
+        // 1) Base64 -> bytes
+        byte[] bytes = null;
+        try {
+            bytes = Convert.FromBase64String(enc);
+            Console.WriteLine("Base64 decodificado: {0} bytes", bytes.Length);
+            Console.WriteLine("Primeros 64 bytes (hex): " + BytesToHex(bytes,64));
+        } catch (Exception ex) {
+            Console.WriteLine("No es Base64 válido: " + ex.Message);
+        }
+
+        // 2) Base64 -> UTF8 texto
+        if (bytes != null) {
+            string s = TryUtf8(bytes);
+            Console.WriteLine("UTF8 detectado: " + (s ?? "<no UTF8 legible>"));
+        }
+
+        // 3) DPAPI LocalMachine
+        if (bytes != null) TryDpapi(bytes, DataProtectionScope.LocalMachine, "DPAPI LocalMachine");
+
+        // 4) DPAPI CurrentUser
+        if (bytes != null) TryDpapi(bytes, DataProtectionScope.CurrentUser, "DPAPI CurrentUser");
+
+        // 5) ProtectedConfiguration (si la cadena es de connectionStrings protegida)
+        try {
+            // intenta leer sección protegida si el valor es una sección completa (solo si aplica)
+            var section = WebConfigurationManager.GetSection("connectionStrings") as System.Configuration.ConnectionStringsSection;
+            if (section != null && section.SectionInformation.IsProtected) {
+                Console.WriteLine("La sección connectionStrings está protegida con provider: " + section.SectionInformation.ProtectionProvider.Name);
+            } else {
+                Console.WriteLine("No se detectó sección connectionStrings protegida en este config.");
+            }
+        } catch (Exception ex) {
+            Console.WriteLine("ProtectedConfiguration check falló: " + ex.Message);
+        }
+
+        // 6) AES con clave en APP_AES_KEY (IV prefijado 16 bytes)
+        var keyB64 = Environment.GetEnvironmentVariable("APP_AES_KEY");
+        if (!string.IsNullOrEmpty(keyB64) && bytes != null) {
+            try {
+                var key = Convert.FromBase64String(keyB64);
+                if (bytes.Length > 16) {
+                    var iv = new byte[16];
+                    Array.Copy(bytes, 0, iv, 0, 16);
+                    var ct = new byte[bytes.Length-16];
+                    Array.Copy(bytes, 16, ct, 0, ct.Length);
+                    using (var aes = Aes.Create()) {
+                        aes.Key = key; aes.IV = iv;
+                        using (var ms = new MemoryStream())
+                        using (var cs = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Write)) {
+                            cs.Write(ct,0,ct.Length); cs.FlushFinalBlock();
+                            var plain = ms.ToArray();
+                            Console.WriteLine("AES OK -> " + TryUtf8(plain));
+                        }
+                    }
+                } else Console.WriteLine("AES: cipher demasiado corto para IV+CT.");
+            } catch (Exception ex) { Console.WriteLine("AES fallo: " + ex.Message); }
+        } else Console.WriteLine("No hay APP_AES_KEY en variables de entorno o no hay bytes Base64.");
+    }
+
+    static void TryDpapi(byte[] cipher, DataProtectionScope scope, string label)
+    {
+        try {
+            var plain = ProtectedData.Unprotect(cipher, null, scope);
+            Console.WriteLine($"{label} OK -> {TryUtf8(plain) ?? "<no UTF8 legible>"}");
+        } catch (Exception ex) {
+            Console.WriteLine($"{label} falló: {ex.Message}");
+        }
+    }
+
+    static string BytesToHex(byte[] b, int max)
+    {
+        int len = Math.Min(max, b.Length);
+        var sb = new StringBuilder();
+        for (int i=0;i<len;i++) sb.AppendFormat("{0:X2}", b[i]);
+        return sb.ToString();
+    }
+
+    static string TryUtf8(byte[] b)
+    {
+        try {
+            var s = Encoding.UTF8.GetString(b);
+            if (s.Contains("User Id=") || s.Contains("Data Source=") || s.Contains("Password=")) return s;
+            return s.Length>0 && IsMostlyPrintable(s) ? s : null;
+        } catch { return null; }
+    }
+
+    static bool IsMostlyPrintable(string s)
+    {
+        int printable = 0;
+        foreach (char c in s) if (!char.IsControl(c)) printable++;
+        return ((double)printable / s.Length) > 0.7;
+    }
+}
