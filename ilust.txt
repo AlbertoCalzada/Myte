@@ -1,0 +1,193 @@
+using System;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+using System.IO;
+using System.Text;
+
+namespace UpdateIllustrations
+{
+    class Program
+    {
+        static string EncryptedConn => ConfigurationManager.AppSettings["EncryptedConnectionString"];
+        static string InputFolder => ConfigurationManager.AppSettings["InputFolder"];
+        static string BackupFolder => ConfigurationManager.AppSettings["BackupFolder"];
+        static string IllustrationDataTable => ConfigurationManager.AppSettings["IllustrationDataTable"] ?? "illustracion_data";
+        static string IllustrationTable => ConfigurationManager.AppSettings["IllustrationTable"] ?? "illustration";
+        static string AuditTable => ConfigurationManager.AppSettings["AuditTable"] ?? "illustration_audit";
+
+        static void Main(string[] args)
+        {
+            bool dryRun = args.Length > 0 && args[0].Equals("--dry", StringComparison.OrdinalIgnoreCase);
+            string folder = args.Length > 1 ? args[1] : InputFolder;
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
+            {
+                Console.WriteLine("Carpeta de entrada no encontrada: " + folder);
+                return;
+            }
+
+            string conn = DecryptConnectionString(EncryptedConn);
+            if (string.IsNullOrEmpty(conn))
+            {
+                Console.WriteLine("No se pudo obtener la cadena de conexión descifrada.");
+                return;
+            }
+
+            Directory.CreateDirectory(BackupFolder);
+
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                try
+                {
+                    string fileName = Path.GetFileName(file);
+                    string name = Path.GetFileNameWithoutExtension(file);
+                    string ext = Path.GetExtension(file).TrimStart('.').ToLower();
+
+                    Console.WriteLine($"Procesando {fileName}");
+
+                    var rec = GetRecordByName(conn, name);
+                    if (rec == null)
+                    {
+                        Console.WriteLine($"  ERROR: no existe registro en {IllustrationDataTable} para '{name}'");
+                        continue;
+                    }
+
+                    int id = rec.Value.id;
+                    string formato = rec.Value.formato?.ToLower();
+                    if (!string.IsNullOrEmpty(formato) && formato != ext)
+                        Console.WriteLine($"  AVISO: formato BD='{formato}' != extensión='{ext}'");
+
+                    if (dryRun)
+                    {
+                        Console.WriteLine($"  DRY RUN: actualizaría id={id} con {fileName}");
+                        continue;
+                    }
+
+                    BackupExistingBlob(conn, id, name);
+
+                    // Leer fichero en memoria (si son muy grandes, ver nota más abajo)
+                    byte[] data = File.ReadAllBytes(file);
+
+                    using (var sql = new SqlConnection(conn))
+                    {
+                        sql.Open();
+                        using (var tx = sql.BeginTransaction())
+                        {
+                            try
+                            {
+                                using (var cmd = sql.CreateCommand())
+                                {
+                                    cmd.Transaction = tx;
+                                    cmd.CommandText = $"UPDATE {IllustrationTable} SET blob_data = @data WHERE id = @id";
+                                    var p = cmd.Parameters.Add("@data", SqlDbType.VarBinary, -1);
+                                    p.Value = data;
+                                    cmd.Parameters.Add("@id", SqlDbType.Int).Value = id;
+                                    int rows = cmd.ExecuteNonQuery();
+                                    if (rows == 0) throw new Exception("No se actualizó ninguna fila en " + IllustrationTable);
+                                }
+
+                                using (var aud = sql.CreateCommand())
+                                {
+                                    aud.Transaction = tx;
+                                    aud.CommandText = $"INSERT INTO {AuditTable} (illustration_id, file_name, updated_at) VALUES (@id,@fn,GETDATE())";
+                                    aud.Parameters.Add("@id", SqlDbType.Int).Value = id;
+                                    aud.Parameters.Add("@fn", SqlDbType.NVarChar, 255).Value = fileName;
+                                    aud.ExecuteNonQuery();
+                                }
+
+                                tx.Commit();
+                                Console.WriteLine($"  OK: id={id} actualizado.");
+                            }
+                            catch (Exception exTx)
+                            {
+                                tx.Rollback();
+                                Console.WriteLine($"  ERROR transacción id={id}: {exTx.Message}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"ERROR procesando archivo {file}: {ex.Message}");
+                }
+            }
+
+            Console.WriteLine("Proceso finalizado.");
+        }
+
+        static string DecryptConnectionString(string encrypted)
+        {
+            if (string.IsNullOrWhiteSpace(encrypted)) return null;
+            encrypted = encrypted.Trim();
+            // Intentar Base64 (común si termina en ==)
+            try
+            {
+                var bytes = Convert.FromBase64String(encrypted);
+                return Encoding.UTF8.GetString(bytes);
+            }
+            catch
+            {
+                // Intentar DPAPI si la cadena fue protegida con ProtectedData
+                try
+                {
+                    var cipher = Convert.FromBase64String(encrypted);
+                    var plain = System.Security.Cryptography.ProtectedData.Unprotect(cipher, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                    return Encoding.UTF8.GetString(plain);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        static (int id, string formato)? GetRecordByName(string conn, string nombre)
+        {
+            using (var sql = new SqlConnection(conn))
+            {
+                sql.Open();
+                using (var cmd = sql.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT id, formato FROM {IllustrationDataTable} WHERE nombre = @nombre";
+                    cmd.Parameters.Add("@nombre", SqlDbType.NVarChar, 255).Value = nombre;
+                    using (var rdr = cmd.ExecuteReader())
+                    {
+                        if (rdr.Read())
+                        {
+                            int id = rdr.GetInt32(0);
+                            string formato = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+                            return (id, formato);
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        static void BackupExistingBlob(string conn, int id, string name)
+        {
+            using (var sql = new SqlConnection(conn))
+            {
+                sql.Open();
+                using (var cmd = sql.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT blob_data FROM {IllustrationTable} WHERE id = @id";
+                    cmd.Parameters.Add("@id", SqlDbType.Int).Value = id;
+                    var obj = cmd.ExecuteScalar();
+                    if (obj != null && obj != DBNull.Value)
+                    {
+                        byte[] blob = (byte[])obj;
+                        if (blob.Length > 0)
+                        {
+                            string backupFile = Path.Combine(BackupFolder, $"{id}_{name}_{DateTime.Now:yyyyMMddHHmmss}.bak");
+                            File.WriteAllBytes(backupFile, blob);
+                            Console.WriteLine($"  Backup guardado: {backupFile}");
+                            return;
+                        }
+                    }
+                    Console.WriteLine("  No había blob previo o estaba vacío.");
+                }
+            }
+        }
+    }
+}
